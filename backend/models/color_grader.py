@@ -3,7 +3,7 @@ Stage 3: Color Grading
 
 Applies parametric color adjustments based on enhancement profiles.
 OpenCV fallback: curve-based grading with shadows/midtones/highlights control.
-PyTorch mode: lightweight CNN trained on MIT FiveK Expert C pairs (stub included).
+PyTorch mode: lightweight CNN trained on DPED phone→DSLR pairs (stub included).
 """
 import logging
 from typing import List, Tuple
@@ -43,16 +43,16 @@ class ColorGrader:
 
     def _load_pytorch_model(self):
         """
-        Load lightweight color grading CNN trained on MIT FiveK dataset.
+        Load lightweight color grading CNN trained on the DPED dataset.
 
         Architecture options:
         - 3DLUT-based network (Zeng et al., 2020): learns a 3D lookup table
         - Small UNet: 4 encoder + 4 decoder blocks, ~2M parameters
-        - Trained on MIT-Adobe FiveK: 5000 RAW images retouched by Expert C
+        - Trained on DPED: ~6000 phone→DSLR paired images per device
 
         Training data:
-            Input: flat demosaiced RAW render (no grading)
-            Target: Expert C JPEG retouched version
+            Input: smartphone JPEG (iPhone / BlackBerry / Sony)
+            Target: Canon DSLR JPEG (same scene)
             See backend/training/train.py for training script.
         """
         try:

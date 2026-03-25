@@ -6,7 +6,7 @@ A web application that transforms RAW camera files into professionally-edited ph
 
 - **Frontend**: React 18, TypeScript, Tailwind CSS, Vite
 - **Backend**: Python, FastAPI, OpenCV, rawpy
-- **ML Pipeline**: DnCNN (denoise), Real-ESRGAN (sharpen), MIT FiveK CNN (color grade)
+- **ML Pipeline**: DnCNN (denoise), Real-ESRGAN (sharpen), DPED CNN (color grade)
 - **Processing**: Patch-based for large images, session caching for RAW decode
 
 ## Quick Start
@@ -14,8 +14,8 @@ A web application that transforms RAW camera files into professionally-edited ph
 ### Backend
 
 ```bash
-pip install -r requirements.txt
 cd raw-enhance
+pip install -r requirements.txt
 python -m uvicorn backend.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
@@ -69,19 +69,48 @@ GET  /health         Health check
 RAW File → rawpy decode → float32 RGB [0,1]
   → Stage 1: Denoise (bilateral filter / DnCNN)
   → Stage 2: Sharpen (unsharp mask / Real-ESRGAN)
-  → Stage 3: Color Grade (parametric curves / MIT FiveK CNN)
+  → Stage 3: Color Grade (parametric curves / DPED CNN)
   → JPEG output
 ```
 
 ### Training the Color Grading Model
 
+The training script uses the **DPED (DSLR Photo Enhancement Dataset)** — freely downloadable, no registration required.
+
+**1. Download the dataset**
+
+Go to http://people.ee.ethz.ch/~ihnatova/ and download one of the phone device archives:
+
+| Archive | Device | Size |
+|---------|--------|------|
+| `iphone.tar.gz` | iPhone 3GS | ≈ 2.5 GB |
+| `blackberry.tar.gz` | BlackBerry Passport | ≈ 2 GB |
+| `sony.tar.gz` | Sony Xperia Z | ≈ 2.5 GB |
+
+**2. Extract and train**
+
+```bash
+tar -xzf iphone.tar.gz   # creates dped/iphone/training_data/
+
+python backend/training/train.py \
+  --dataset /path/to/dped/iphone \
+  --device iphone \
+  --crop-size 100 \
+  --epochs 50 \
+  --batch-size 16
+```
+
+**3. Evaluate a checkpoint**
+
 ```bash
 python backend/training/train.py \
-  --dataset /path/to/mit-fivek \
-  --expert C \
-  --epochs 50 \
-  --batch-size 8
+  --dataset /path/to/dped/iphone \
+  --device iphone \
+  --eval-only \
+  --checkpoint weights/colorgrade.pth
 ```
+
+The trained `colorgrade.pth` file goes in `backend/weights/` and is loaded automatically when `PIPELINE_MODE=pytorch`.
 
 ## Environment Modes
 
