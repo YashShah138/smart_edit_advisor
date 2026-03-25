@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-surface-200 text-stone-900;
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+  }
+
+  ::-webkit-scrollbar {
+    width: 6px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #e4dfd9;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #b8b0a8;
+    border-radius: 3px;
+  }
+}
+
+@layer components {
+  .glass-panel {
+    @apply bg-surface-100/80 backdrop-blur-sm border border-surface-400 rounded-xl shadow-sm;
+  }
+
+  .accent-glow {
+    box-shadow: 0 0 20px rgba(194, 65, 12, 0.18);
+  }
+}
