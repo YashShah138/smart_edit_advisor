@@ -92,5 +92,3 @@ python backend/training/train.py \
 
 - **Frontend**: `cd frontend && npm run build` → deploy `dist/` to Vercel
 - **Backend**: Deploy FastAPI to Modal or Render with `PIPELINE_MODE=pytorch`
-
->>>>>>> 74da666 (all code)
