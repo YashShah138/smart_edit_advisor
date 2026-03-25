@@ -1,6 +1,3 @@
-<<<<<<< HEAD
-# smart_edit_advisor
-=======
 # AI RAW Photo Enhancement Pipeline
 
 A web application that transforms RAW camera files into professionally-edited photos using a three-stage ML pipeline: **Denoise → Sharpen → Color Grade**.
