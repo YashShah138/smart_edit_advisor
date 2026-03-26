@@ -9,3 +9,5 @@ backend/uploads/
 backend/weights/
 .vite/
 *.timestamp-*
+colorgrade.pth
+.vscode/

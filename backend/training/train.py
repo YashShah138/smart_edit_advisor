@@ -19,25 +19,29 @@ Architecture: Small UNet-style network (~2M parameters)
 Training:
   - Loss: L1
   - Optimizer: Adam, lr=1e-4
-  - Batch size: 8 (256×256 crops)
+  - Batch size: 8 (256x256 crops)
   - Epochs: 50 (converges in ~30)
-  - Hardware: Google Colab T4 GPU, ~2–3 hours
+  - Hardware: Google Colab T4 GPU, ~2-3 hours
 
-Quick start:
-  1. Download one of the DPED phone folders from:
-       http://people.ee.ethz.ch/~ihnatova/
-     e.g. download  iphone.tar.gz  (≈ 2.5 GB)
-  2. Extract to a local folder so the structure is:
-       dped/
-       └── iphone/
-           └── training_data/
-               ├── iphone/        ← input JPEGs (e.g. 1.jpg, 2.jpg …)
-               └── canon/         ← target JPEGs (same filenames)
-  3. python3 train.py --dataset /path/to/dped/iphone --device iphone --epochs 50
+Expected dataset layout (from project root):
+    dataset/
+    ├── iphone/
+    │   ├── training_data/
+    │   │   ├── iphone/    ← input JPEGs  (0.jpg, 1.jpg …)
+    │   │   └── canon/     ← target JPEGs (same filenames)
+    │   └── test_data/
+    ├── blackberry/
+    │   └── training_data/
+    │       ├── blackberry/
+    │       └── canon/
+    └── sony/
+        └── training_data/
+            ├── sony/
+            └── canon/
 
-Usage:
-    python3 train.py --dataset /path/to/dped/iphone --device iphone --epochs 50
-    python3 train.py --dataset /path/to/dped/iphone --eval-only --checkpoint weights/colorgrade.pth
+Usage (run from inside raw-enhance/):
+    python3 backend/training/train.py --dataset ../dataset/iphone --device iphone --crop-size 100 --epochs 50
+    python3 backend/training/train.py --dataset ../dataset/iphone --eval-only --checkpoint weights/colorgrade.pth
 
 Output:
     Saves model checkpoint to --output-dir (default: weights/colorgrade.pth)
@@ -66,6 +70,7 @@ def build_model():
     try:
         import torch
         import torch.nn as nn
+        import torch.nn.functional as F
     except ImportError:
         print("PyTorch is required for training. Install with:")
         print("  pip install torch torchvision")
@@ -118,19 +123,36 @@ def build_model():
                 nn.Sigmoid(),
             )
 
+        def _cat(self, upsampled, skip):
+            # Trim skip to match upsampled size — handles odd spatial dims
+            # where MaxPool floors and ConvTranspose comes back 1px short.
+            return torch.cat([
+                upsampled,
+                skip[:, :, :upsampled.shape[2], :upsampled.shape[3]],
+            ], dim=1)
+
         def forward(self, x):
+            # Pad spatial dims to the nearest multiple of 8 (= 2^3 pool stages)
+            # so the decoder always reconstructs back to the exact input size.
+            h, w = x.shape[2], x.shape[3]
+            pad_h = (8 - h % 8) % 8
+            pad_w = (8 - w % 8) % 8
+            if pad_h or pad_w:
+                x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+
             # Encode
             e1 = self.enc1(x)
             e2 = self.enc2(self.pool(e1))
             e3 = self.enc3(self.pool(e2))
             e4 = self.enc4(self.pool(e3))
 
-            # Decode with skip connections
-            d3 = self.dec3(torch.cat([self.up3(e4), e3], dim=1))
-            d2 = self.dec2(torch.cat([self.up2(d3), e2], dim=1))
-            d1 = self.dec1(torch.cat([self.up1(d2), e1], dim=1))
+            # Decode with skip connections (trim skips to match decoder size)
+            d3 = self.dec3(self._cat(self.up3(e4), e3))
+            d2 = self.dec2(self._cat(self.up2(d3), e2))
+            d1 = self.dec1(self._cat(self.up1(d2), e1))
 
-            return self.final(d1)
+            # Crop back to original spatial size
+            return self.final(d1)[:, :, :h, :w]
 
     model = ColorGradeUNet()
     param_count = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -298,13 +320,40 @@ class DPEDDataset:
         return input_img.clip(0, 1), target_img.clip(0, 1)
 
 
+def _collate_fn(batch):
+    """
+    Module-level collate — must live at module scope so multiprocessing
+    workers can pickle it. Local/nested functions cannot be pickled.
+    """
+    import torch
+    inputs  = torch.stack([torch.from_numpy(b[0]).permute(2, 0, 1) for b in batch])
+    targets = torch.stack([torch.from_numpy(b[1]).permute(2, 0, 1) for b in batch])
+    return inputs, targets
+
+
 def train(args):
     """Main training loop."""
+    import time
     import torch
     import torch.nn as nn
     from torch.utils.data import DataLoader
 
-    device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    # Select compute device
+    if args.accelerator == "mps":
+        if torch.backends.mps.is_available():
+            device_torch = torch.device("mps")
+        else:
+            print("Warning: MPS not available on this machine, falling back to CPU.")
+            device_torch = torch.device("cpu")
+    elif args.accelerator == "cuda":
+        if torch.cuda.is_available():
+            device_torch = torch.device("cuda")
+        else:
+            print("Warning: CUDA not available on this machine, falling back to CPU.")
+            device_torch = torch.device("cpu")
+    else:
+        device_torch = torch.device("cpu")
+
     print(f"Training on: {device_torch}")
 
     # Build model
@@ -317,21 +366,21 @@ def train(args):
     n_val   = max(1, len(dataset) // 10)
     n_train = len(dataset) - n_val
 
-    def collate_fn(batch):
-        inputs  = torch.stack([torch.from_numpy(b[0]).permute(2, 0, 1) for b in batch])
-        targets = torch.stack([torch.from_numpy(b[1]).permute(2, 0, 1) for b in batch])
-        return inputs, targets
+    # num_workers=0 keeps data loading in the main process, avoiding multiprocessing
+    # pickling issues on macOS with Python 3.13+ (spawn start method).
+    # On Linux with a GPU set this to 4+ for faster throughput.
+    num_workers = 0
 
     train_subset = torch.utils.data.Subset(dataset, list(range(n_train)))
     val_subset   = torch.utils.data.Subset(dataset, list(range(n_train, len(dataset))))
 
     train_loader = DataLoader(
         train_subset, batch_size=args.batch_size, shuffle=True,
-        collate_fn=collate_fn, num_workers=2,
+        collate_fn=_collate_fn, num_workers=num_workers,
     )
     val_loader = DataLoader(
         val_subset, batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=2,
+        collate_fn=_collate_fn, num_workers=num_workers,
     )
 
     # Loss and optimiser
@@ -343,20 +392,55 @@ def train(args):
     output_dir    = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    total_batches = len(train_loader)
+    log_every     = max(1, total_batches // 10)   # print ~10 times per epoch
+
+    print(f"\nDataset  : {n_train} train / {n_val} val images")
+    print(f"Batches  : {total_batches} per epoch  (batch size {args.batch_size})")
+    print(f"Epochs   : {args.epochs}")
+    print(f"Output   : {output_dir / 'colorgrade.pth'}")
+    print("-" * 60)
+
+    training_start = time.time()
+
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.time()
+
         # ── Train ──────────────────────────────────────────────────────────
         model.train()
-        train_loss = 0.0
-        for inputs, targets in train_loader:
+        train_loss   = 0.0
+        running_loss = 0.0
+
+        for batch_idx, (inputs, targets) in enumerate(train_loader, start=1):
             inputs, targets = inputs.to(device_torch), targets.to(device_torch)
             optimizer.zero_grad()
             loss = l1_loss(model(inputs), targets)
             loss.backward()
             optimizer.step()
-            train_loss += loss.item()
-        train_loss /= max(len(train_loader), 1)
+
+            batch_loss    = loss.item()
+            train_loss   += batch_loss
+            running_loss += batch_loss
+
+            # Intra-epoch progress
+            if batch_idx % log_every == 0 or batch_idx == total_batches:
+                avg_running = running_loss / log_every
+                elapsed     = time.time() - epoch_start
+                batches_left = total_batches - batch_idx
+                eta_epoch    = elapsed / batch_idx * batches_left
+                print(
+                    f"  Epoch {epoch}/{args.epochs} "
+                    f"[{batch_idx:>{len(str(total_batches))}}/{total_batches}]  "
+                    f"L1: {avg_running:.4f}  "
+                    f"ETA this epoch: {eta_epoch:.0f}s"
+                )
+                running_loss = 0.0
+
+        train_loss /= max(total_batches, 1)
+        epoch_time  = time.time() - epoch_start
 
         # ── Validate ───────────────────────────────────────────────────────
+        print(f"  Validating…", end=" ", flush=True)
         model.eval()
         val_loss = 0.0
         with torch.no_grad():
@@ -366,20 +450,33 @@ def train(args):
         val_loss /= max(len(val_loader), 1)
         scheduler.step()
 
+        # Estimate total time remaining
+        epochs_done = epoch
+        epochs_left = args.epochs - epochs_done
+        avg_epoch_time = (time.time() - training_start) / epochs_done
+        eta_total = avg_epoch_time * epochs_left
+
         print(
-            f"Epoch {epoch}/{args.epochs} — "
-            f"Train L1: {train_loss:.4f}, Val L1: {val_loss:.4f}, "
-            f"LR: {scheduler.get_last_lr()[0]:.6f}"
+            f"done\n"
+            f"Epoch {epoch}/{args.epochs} summary — "
+            f"Train L1: {train_loss:.4f}  Val L1: {val_loss:.4f}  "
+            f"LR: {scheduler.get_last_lr()[0]:.2e}  "
+            f"Time: {epoch_time:.0f}s  "
+            f"ETA total: {eta_total/60:.1f}min"
         )
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss
             ckpt = output_dir / "colorgrade.pth"
             torch.save(model.state_dict(), str(ckpt))
-            print(f"  → Saved best model (val_loss={val_loss:.4f}) → {ckpt}")
+            print(f"  ✓ New best — saved checkpoint (val={val_loss:.4f}) → {ckpt}")
 
-    print(f"\nTraining complete. Best val loss: {best_val_loss:.4f}")
-    print(f"Model saved to: {output_dir / 'colorgrade.pth'}")
+        print("-" * 60)
+
+    total_time = time.time() - training_start
+    print(f"\nTraining complete in {total_time/60:.1f} min")
+    print(f"Best val loss : {best_val_loss:.4f}")
+    print(f"Checkpoint    : {output_dir / 'colorgrade.pth'}")
 
 
 def _eval_checkpoint(args) -> None:
@@ -388,7 +485,13 @@ def _eval_checkpoint(args) -> None:
     import torch.nn as nn
     from torch.utils.data import DataLoader
 
-    device_torch = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if args.accelerator == "mps" and torch.backends.mps.is_available():
+        device_torch = torch.device("mps")
+    elif args.accelerator == "cuda" and torch.cuda.is_available():
+        device_torch = torch.device("cuda")
+    else:
+        device_torch = torch.device("cpu")
+
     model = build_model().to(device_torch)
     state = torch.load(args.checkpoint, map_location=device_torch)
     model.load_state_dict(state)
@@ -399,15 +502,10 @@ def _eval_checkpoint(args) -> None:
     n_val      = max(1, len(dataset) // 10)
     val_indices = list(range(len(dataset) - n_val, len(dataset)))
 
-    def collate_fn(batch):
-        inputs  = torch.stack([torch.from_numpy(b[0]).permute(2, 0, 1) for b in batch])
-        targets = torch.stack([torch.from_numpy(b[1]).permute(2, 0, 1) for b in batch])
-        return inputs, targets
-
     val_loader = DataLoader(
         torch.utils.data.Subset(dataset, val_indices),
         batch_size=args.batch_size, shuffle=False,
-        collate_fn=collate_fn, num_workers=2,
+        collate_fn=_collate_fn, num_workers=0,
     )
 
     l1_loss = nn.L1Loss()
@@ -424,21 +522,22 @@ def main():
     parser = argparse.ArgumentParser(
         description=(
             "Train a photo enhancement CNN on the DPED dataset.\n\n"
-            "Quick start:\n"
-            "  1. Download the DPED dataset (free, no registration):\n"
-            "       http://people.ee.ethz.ch/~ihnatova/\n"
-            "     Choose one device archive, e.g. iphone.tar.gz (≈ 2.5 GB)\n\n"
-            "  2. Extract it:\n"
-            "       tar -xzf iphone.tar.gz  →  dped/iphone/training_data/\n\n"
-            "  3. Run training:\n"
-            "       python3 train.py --dataset /path/to/dped/iphone --device iphone\n"
+            "Run from inside raw-enhance/:\n\n"
+            "  python3 backend/training/train.py \\\n"
+            "    --dataset ../dataset/iphone \\\n"
+            "    --device iphone \\\n"
+            "    --crop-size 100 \\\n"
+            "    --epochs 50 \\\n"
+            "    --batch-size 16\n\n"
+            "Available devices: iphone, blackberry, sony\n"
+            "Dataset root: ../dataset/<device>/training_data/\n"
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument(
         "--dataset", type=str, required=True,
         help=(
-            "Path to the extracted DPED device folder, e.g. /data/dped/iphone. "
+            "Path to the DPED device folder, e.g. ../dataset/iphone. "
             "Must contain training_data/<device>/ and training_data/canon/."
         ),
     )
@@ -451,6 +550,16 @@ def main():
     parser.add_argument("--batch-size", type=int,   default=8)
     parser.add_argument("--lr",         type=float, default=1e-4)
     parser.add_argument("--crop-size",  type=int,   default=256)
+    parser.add_argument(
+        "--accelerator", type=str, default="cpu",
+        choices=["cpu", "mps", "cuda"],
+        help=(
+            "Compute device to train on. "
+            "Use 'mps' for Apple Silicon (M1/M2/M3/M4), "
+            "'cuda' for NVIDIA GPU, "
+            "'cpu' for CPU only (default)."
+        ),
+    )
     parser.add_argument(
         "--output-dir", type=str, default="weights",
         help="Directory to save trained model weights (default: weights/)",
