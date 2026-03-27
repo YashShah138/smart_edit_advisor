@@ -40,7 +40,7 @@ export default function App() {
                 Transform your RAW photos with AI
               </h2>
               <p className="text-stone-500 text-sm max-w-lg mx-auto">
-                Upload a RAW file and our three-stage ML pipeline will denoise, sharpen, and color grade it
+                Upload a RAW file and the three-stage ML pipeline will denoise, sharpen, and color grade it
                 to produce a professionally edited result.
               </p>
             </div>

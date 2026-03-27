@@ -233,7 +233,7 @@ class DPEDDataset:
                 f"  {self.root}/canon/          ← DSLR target images\n"
                 "\nDownload the DPED dataset (free, no sign-up):\n"
                 "  http://people.ee.ethz.ch/~ihnatova/\n"
-                f"\nSelect the '{self.device}' archive (≈2–3 GB), extract it, then run:\n"
+                f"\nSelect the '{self.device}' archive (≈2-3 GB), extract it, then run:\n"
                 f"  python3 train.py --dataset /path/to/dped/{self.device} "
                 f"--device {self.device}"
             )

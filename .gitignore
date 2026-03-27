@@ -11,3 +11,4 @@ backend/weights/
 *.timestamp-*
 colorgrade.pth
 .vscode/
+.DS_Store

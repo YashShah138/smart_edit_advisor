@@ -58,44 +58,67 @@ class ColorGrader:
         try:
             import torch
             import torch.nn as nn
+            import torch.nn.functional as F
 
-            class ColorGradeCNN(nn.Module):
-                """
-                Lightweight color grading network.
-                Takes RGB image, outputs graded RGB image.
-                Uses adaptive instance normalization for style conditioning.
-                """
-
-                def __init__(self, in_ch=3, out_ch=3, features=32):
+            # Must match the ColorGradeUNet architecture in backend/training/train.py exactly.
+            class ConvBlock(nn.Module):
+                def __init__(self, in_ch, out_ch):
                     super().__init__()
-                    self.encoder = nn.Sequential(
-                        nn.Conv2d(in_ch, features, 3, padding=1),
+                    self.conv = nn.Sequential(
+                        nn.Conv2d(in_ch, out_ch, 3, padding=1),
+                        nn.BatchNorm2d(out_ch),
                         nn.ReLU(inplace=True),
-                        nn.Conv2d(features, features * 2, 3, padding=1),
+                        nn.Conv2d(out_ch, out_ch, 3, padding=1),
+                        nn.BatchNorm2d(out_ch),
                         nn.ReLU(inplace=True),
-                        nn.Conv2d(features * 2, features * 2, 3, padding=1),
-                        nn.ReLU(inplace=True),
-                    )
-                    self.decoder = nn.Sequential(
-                        nn.Conv2d(features * 2, features, 3, padding=1),
-                        nn.ReLU(inplace=True),
-                        nn.Conv2d(features, out_ch, 3, padding=1),
-                        nn.Sigmoid(),
                     )
 
                 def forward(self, x):
-                    features = self.encoder(x)
-                    return self.decoder(features)
+                    return self.conv(x)
+
+            class ColorGradeUNet(nn.Module):
+                def __init__(self):
+                    super().__init__()
+                    self.enc1 = ConvBlock(3, 32)
+                    self.enc2 = ConvBlock(32, 64)
+                    self.enc3 = ConvBlock(64, 128)
+                    self.enc4 = ConvBlock(128, 256)
+                    self.pool = nn.MaxPool2d(2)
+                    self.up3  = nn.ConvTranspose2d(256, 128, 2, stride=2)
+                    self.dec3 = ConvBlock(256, 128)
+                    self.up2  = nn.ConvTranspose2d(128, 64, 2, stride=2)
+                    self.dec2 = ConvBlock(128, 64)
+                    self.up1  = nn.ConvTranspose2d(64, 32, 2, stride=2)
+                    self.dec1 = ConvBlock(64, 32)
+                    self.final = nn.Sequential(nn.Conv2d(32, 3, 1), nn.Sigmoid())
+
+                def _cat(self, up, skip):
+                    return torch.cat([up, skip[:, :, :up.shape[2], :up.shape[3]]], dim=1)
+
+                def forward(self, x):
+                    h, w = x.shape[2], x.shape[3]
+                    pad_h = (8 - h % 8) % 8
+                    pad_w = (8 - w % 8) % 8
+                    if pad_h or pad_w:
+                        x = F.pad(x, (0, pad_w, 0, pad_h), mode="reflect")
+                    e1 = self.enc1(x)
+                    e2 = self.enc2(self.pool(e1))
+                    e3 = self.enc3(self.pool(e2))
+                    e4 = self.enc4(self.pool(e3))
+                    d3 = self.dec3(self._cat(self.up3(e4), e3))
+                    d2 = self.dec2(self._cat(self.up2(d3), e2))
+                    d1 = self.dec1(self._cat(self.up1(d2), e1))
+                    return self.final(d1)[:, :, :h, :w]
 
             from backend.config import COLORGRADE_MODEL_PATH
             if COLORGRADE_MODEL_PATH.exists():
-                self.model = ColorGradeCNN()
+                self.model = ColorGradeUNet()
                 state_dict = torch.load(str(COLORGRADE_MODEL_PATH), map_location="cpu")
                 self.model.load_state_dict(state_dict)
                 self.model.eval()
-                logger.info("Color grading CNN loaded")
+                logger.info("Color grading UNet loaded from %s", COLORGRADE_MODEL_PATH)
             else:
-                logger.warning("Color grading model not found, using parametric fallback")
+                logger.warning("Color grading model not found at %s, using parametric fallback", COLORGRADE_MODEL_PATH)
                 self.mode = "opencv"
         except ImportError:
             logger.warning("PyTorch not available for color grading, using parametric mode")
